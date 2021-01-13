@@ -1,11 +1,16 @@
 library(AppliedPredictiveModeling)
 library(tidyverse)
+library(tidyquant)
 library(mlbench)
 library(forcats)
 library(caret)
 library(caTools)
+library(fs)
+library(glue)
 library(h2o)
 h2o.init()
+
+wd = getwd()
 
 # install.packages("e1071")
 # install.packages("caTools")
@@ -38,7 +43,6 @@ glimpse(sonar_train_tbl)
 
 # Confirm train set size
 nrow(sonar_train_tbl)/nrow(Sonar_tbl)
-
 
 # Create trainControl object: myControl
 
@@ -98,12 +102,12 @@ for(i in 1:6) {
   automl_models_h2o@leaderboard %>% 
     extract_model_name_by_position(i) %>%
     h2o.getModel() %>%
-    h2o.saveModel(path = "04_Modeling/h2o_models/")
+    h2o.saveModel(path = glue("{wd}/04_Modeling/h2o_models/"))
 }
 
 
 # Single model
-sonar_h2o_ensemble <- h2o.loadModel(path = "04_Modeling/h2o_models/StackedEnsemble_AllModels_AutoML_20210113_130138")
+sonar_h2o_ensemble <- h2o.loadModel(path = glue("{wd}/04_Modeling/h2o_models/StackedEnsemble_AllModels_AutoML_20210113_130138"))
 
 p_h2o <- h2o.predict(sonar_h2o_ensemble,  newdata = as.h2o(sonar_test_tbl)) %>% as_tibble()
 
@@ -118,6 +122,12 @@ test_results <- sonar_test_tbl %>%
   mutate(probability = p,
          pred_class = if_else(probability > 0.5, "M", "R") %>% 
            as_factor()) 
+
+# simple_glm_model <- p %>%
+#   mutate(
+#     path = "simple_glm_model",
+#     tpr = 
+#   )
 
 # Create confusion matrix
 confusionMatrix(test_results$pred_class, test_results$Class)
@@ -142,3 +152,85 @@ myControl <- trainControl(
   verboseIter = TRUE
 )
 
+performance_h2o <- h2o.performance(sonar_h2o_ensemble, newdata = as.h2o(sonar_test_tbl))
+typeof(performance_h2o)
+performance_h2o %>% slotNames()
+performance_h2o@algorithm
+performance_h2o@metrics
+
+
+# Classifier Summary Metrics
+h2o.auc(performance_h2o)
+h2o.giniCoef(performance_h2o)
+h2o.logloss(performance_h2o)
+
+# Performance on training data
+h2o.confusionMatrix(sonar_h2o_ensemble)
+
+# Evaluate performance on the test set
+h2o.confusionMatrix(performance_h2o)
+
+# Precision vs Recall Plot
+
+performance_tbl <- performance_h2o %>%
+  h2o.metric() %>%
+  as_tibble() 
+
+performance_tbl %>%
+  arrange(desc(f1)) %>%
+  glimpse()
+
+performance_tbl %>%
+  ggplot(aes(x = threshold)) +
+  geom_line(aes(y = precision, color = "orange")) +
+  geom_line(aes(y = recall, color = "blue")) +
+  geom_vline(xintercept = h2o.find_threshold_by_max_metric(performance_h2o, "f1")) + 
+  theme_tq() +
+  labs(
+    title = "Precision vs Recall",
+    y = "value"
+  )
+
+
+# Function to load performance metrics for models
+path <- glue("{wd}/04_Modeling/h2o_models/StackedEnsemble_AllModels_AutoML_20210113_130138")
+test_tbl <- sonar_test_tbl
+
+load_model_performance_metrics <- function (path, test_tbl) {
+  
+  model_h2o <- h2o.loadModel(path)
+  perf_h2o <- h2o.performance(model_h2o, newdata = as.h2o(test_tbl))
+  
+  perf_h2o %>%
+    h2o.metric() %>% 
+    as_tibble() %>%
+    mutate(auc = h2o.auc(perf_h2o)) %>%
+    select(tpr, fpr, auc, precision, recall)
+}
+
+load_model_performance_metrics(path, sonar_test_tbl) 
+
+# Get the path to each model and load performance metrics
+model_metrics_tbl <- fs::dir_info(path = glue("{wd}/04_Modeling/h2o_models/"), fail = TRUE) %>%
+  select(path) %>%
+  mutate(metrics = map(path, load_model_performance_metrics, test_tbl)) %>%
+  unnest(cols = c(metrics)) %>% filter(auc > 0.87)
+
+number_of_folders_in_path <- 9
+model_metrics_tbl %>%
+  mutate(
+    Prediction_Method = str_split(string = path, pattern = "/",simplify = T)[,number_of_folders_in_path] %>% as_factor(),
+    AUC = auc %>% round(3) %>% as.character() %>% as_factor()) %>%
+  ggplot(aes(x = fpr, y = tpr, color = Prediction_Method, linetype = AUC)) +
+  geom_segment(aes(x = 0, y = 0, xend = 1, yend = 1, color = "Random Guessing", linetype = "0.5"), size = 0.1) + 
+  geom_line(size = .6) +
+  theme_tq() +
+  scale_color_tq() +
+  theme(legend.direction = "vertical") +
+  labs(
+    title = "ROC Plot - Performance of Sonar Signal Processing Models",
+    subtitle = "How to tell the difference between a rock and a mine from a sonar receiver signal?",
+    caption = "The ROC curve was first developed by engineers during World War II. The closer the area under the curve (auc) is to 1 the better",
+    x = "False positive rate",
+    y = "True positive rate"
+  )
