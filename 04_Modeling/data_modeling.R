@@ -1,3 +1,5 @@
+# 1 Load libraries ----
+
 library(AppliedPredictiveModeling)
 library(tidyverse)
 library(tidyquant)
@@ -15,10 +17,11 @@ wd = getwd()
 # install.packages("e1071")
 # install.packages("caTools")
 
-# Import dataset
+# 2 Prepare dataset ----
 # Analysing sonar data was one of the first applications of machine learning
 # Differentiating between a rock "R" and a mine "M" using 60 different sonar signal characteristics
 data("Sonar")
+data("wine")
 
 glimpse(Sonar)
 
@@ -44,16 +47,131 @@ glimpse(sonar_train_tbl)
 # Confirm train set size
 nrow(sonar_train_tbl)/nrow(Sonar_tbl)
 
-# Create trainControl object: myControl
 
-# Fit glm model: model
+# 3 Fit model using caret package ----
+
+# 3.1 Fit glm model: model ----
 model <- glm(
   Class ~ ., 
   family = "binomial",
   sonar_train_tbl
 )
 
-# Fit h2o AutoML
+# Predict on test: p
+p <- predict(model, sonar_test_tbl, type = "response") 
+
+# Store results and convert prediction to a factor
+test_results <- sonar_test_tbl %>%
+  select(Class) %>%
+  mutate(probability = p,
+         pred_class = if_else(probability > 0.5, "M", "R") %>% 
+           as_factor()) 
+
+# Create confusion matrix
+confusionMatrix(test_results$pred_class, test_results$Class)
+
+# A 50% threshold may not be a great choice for this application.
+# The cost of a false negative is likely to be far greater than a false positive
+# For classification problems a Receiver Operator Characteristic (ROC) Curve
+# This illustrates how the diagnositic ability of a binary classifier system 
+# changes as its discrimination threshold is varied.
+
+# Make ROC curve using caTools() and caret package
+colAUC(test_results$probability, test_results$Class, plotROC = TRUE)
+
+# First glm model is not a good classifier.  Let's try to improve it.
+# Create trainControl object: myControl
+myControl <- trainControl(
+  method = "cv",
+  number = 10,
+  summaryFunction = twoClassSummary,  # Required to use AUC to rank classification models
+  classProbs = TRUE, # Must be true for classification models
+  verboseIter = TRUE
+)
+
+model_caret_glm <- train(Class ~ ., data = sonar_train_tbl, method = "glm", trControl = myControl)
+model_caret_glm
+# plot(model_caret_glm) # no tuning parameters for glm
+
+# From previous step
+# tuneGrid <- data.frame(
+#   .mtry = c(2, 3, 7),
+#   .splitrule = "variance",
+#   .min.node.size = 5
+# )
+
+# 3.2 Fit random forest: model ----
+model_caret_rf <- train(
+    Class ~.,
+    tuneLength = 6,
+    # tuneGrid = tuneGrid,
+    data = sonar_train_tbl, 
+    method = "ranger",
+    trControl = myControl
+    )
+
+# Print model to console
+model_caret_rf
+plot(model_caret_rf)
+
+# Predict on test: p
+p <- predict(model_caret_rf, sonar_test_tbl, type = "prob") 
+
+# Store results and convert prediction to a factor
+test_results_rf <- sonar_test_tbl %>%
+  select(Class) %>%
+  mutate(probability = predict(model_caret_rf, sonar_test_tbl, type = "prob"))
+
+# Make ROC curve using caTools() and caret package
+colAUC(test_results_rf$probability, test_results_rf$Class, plotROC = TRUE)
+
+# 3.3 Fit glmnet model ----
+# Train glmnet with custom trainControl and tuning: model
+model_caret_glmnet <- train(
+  Class ~.,
+  data = sonar_train_tbl,
+  tuneGrid = expand.grid(
+    alpha = seq(0,1,0.2),  # Lasso - alpha = 1, Ridge - alpha = 0
+    lambda = seq(0.0001, 1, length = 100)
+    ),
+  method = "glmnet",
+  trControl = myControl
+)
+
+# Print model to console
+model_caret_glmnet
+plot(model_caret_glmnet)
+# Predict on test: p
+p <- predict(model_caret_glmnet, sonar_test_tbl, type = "prob") 
+
+# Store results and convert prediction to a factor
+test_results_glmnet <- sonar_test_tbl %>%
+  select(Class) %>%
+  mutate(probability = predict(model_caret_glmnet, sonar_test_tbl, type = "prob"))
+
+# Make ROC curve using caTools() and caret package
+colAUC(test_results_glmnet$probability, test_results_glmnet$Class, plotROC = TRUE)
+
+# Print maximum ROC statistics
+max(model_caret_glmnet[["results"]]$ROC)
+max(model_caret_glm[["results"]]$ROC)
+max(model_caret_rf[["results"]]$ROC)
+
+# Save and load caret models
+
+model_caret_rf
+
+# Save caret models
+saveRDS(model_caret_rf, glue("{wd}/04_Modeling/caret_models/model_caret_rf.rds"))
+saveRDS(model_caret_glmnet, glue("{wd}/04_Modeling/caret_models/model_caret_glmnet.rds"))
+saveRDS(model_caret_glm, glue("{wd}/04_Modeling/caret_models/model_caret_glm.rds"))
+
+# Load caret models
+model_caret_glm <- readRDS(glue("{wd}/04_Modeling/caret_models/model_caret_glm.rds"))
+model_caret_glmnet <- readRDS(glue("{wd}/04_Modeling/caret_models/model_caret_glmnet.rds"))
+model_caret_rf <- readRDS(glue("{wd}/04_Modeling/caret_models/model_caret_rf.rds"))
+
+# 4.1 Fit h2o AutoML ----
 y <- "Class"
 x <- setdiff(names(sonar_train_tbl), y)
 
@@ -85,6 +203,8 @@ automl_models_h2o@leaderboard %>%
   pull(model_id) %>%
   h2o.getModel()
 
+
+
 extract_model_name_by_position <- function (h2o_leaderboard, n = 1, verbose = TRUE){
   
   model_name <- h2o_leaderboard %>%
@@ -111,46 +231,11 @@ sonar_h2o_ensemble <- h2o.loadModel(path = glue("{wd}/04_Modeling/h2o_models/Sta
 
 p_h2o <- h2o.predict(sonar_h2o_ensemble,  newdata = as.h2o(sonar_test_tbl)) %>% as_tibble()
 
-
-
-# Predict on test: p
-p <- predict(model, sonar_test_tbl, type = "response") 
-
-# Store results and convert prediction to a factor
-test_results <- sonar_test_tbl %>%
-  select(Class) %>%
-  mutate(probability = p,
-         pred_class = if_else(probability > 0.5, "M", "R") %>% 
-           as_factor()) 
-
-# simple_glm_model <- p %>%
-#   mutate(
-#     path = "simple_glm_model",
-#     tpr = 
-#   )
-
-# Create confusion matrix
-confusionMatrix(test_results$pred_class, test_results$Class)
-
-# A 50% threshold may not be a great choice for this application.
-# The cost of a false negative is likely to be far greater than a false positive
-# For classification problems a Receiver Operator Characteristic (ROC) Curve
-# This illustrates how the diagnositic ability of a binary classifier system 
-# changes as its discrimination threshold is varied.
-
-# Make ROC curve using caTools() package
-colAUC(test_results$probability, test_results$Class, plotROC = TRUE)
-
-# ROC curve for h2o model
+# Quick ROC Plot
 colAUC(p_h2o$M, sonar_test_tbl$Class, plotROC = TRUE) 
 
-myControl <- trainControl(
-  method = "cv",
-  number = 10,
-  summaryFunction = twoClassSummary,
-  classProbs = TRUE, # IMPORTANT!
-  verboseIter = TRUE
-)
+
+# 4.2 ROC curve for h2o model ----
 
 performance_h2o <- h2o.performance(sonar_h2o_ensemble, newdata = as.h2o(sonar_test_tbl))
 typeof(performance_h2o)
