@@ -1,6 +1,6 @@
 # 1 Load libraries ----
 
-library(AppliedPredictiveModeling)
+# library(AppliedPredictiveModeling)  # Useful source of other test datasets
 library(tidyverse)
 library(tidyquant)
 library(mlbench)
@@ -21,7 +21,6 @@ wd = getwd()
 # Analysing sonar data was one of the first applications of machine learning
 # Differentiating between a rock "R" and a mine "M" using 60 different sonar signal characteristics
 data("Sonar")
-data("wine")
 
 glimpse(Sonar)
 
@@ -44,9 +43,21 @@ sonar_test_tbl <- Sonar_tbl[(split + 1):nrow(Sonar_tbl),]
 glimpse(sonar_test_tbl)
 glimpse(sonar_train_tbl)
 
+# Identify near zero variance predictors: remove_cols
+remove_cols <- nearZeroVar(sonar_train_tbl, names = TRUE, 
+                           freqCut = 2, uniqueCut = 20)
+
+# Get all column names from sonar_train_tbl: all_cols
+all_cols <- names(sonar_train_tbl)
+
+# Remove from data: data_x_small
+data_x_small <- sonar_train_tbl[ , setdiff(all_cols, remove_cols)]
+
+ncol(data_x_small)
+ncol(sonar_train_tbl)
+
 # Confirm train set size
 nrow(sonar_train_tbl)/nrow(Sonar_tbl)
-
 
 # 3 Fit model using caret package ----
 
@@ -135,7 +146,8 @@ model_caret_glmnet <- train(
     lambda = seq(0.0001, 1, length = 100)
     ),
   method = "glmnet",
-  trControl = myControl
+  trControl = myControl,
+  preProcess = "knnImpute"
 )
 
 # Print model to console
@@ -156,6 +168,8 @@ colAUC(test_results_glmnet$probability, test_results_glmnet$Class, plotROC = TRU
 max(model_caret_glmnet[["results"]]$ROC)
 max(model_caret_glm[["results"]]$ROC)
 max(model_caret_rf[["results"]]$ROC)
+
+dotPlot()
 
 # Save and load caret models
 
